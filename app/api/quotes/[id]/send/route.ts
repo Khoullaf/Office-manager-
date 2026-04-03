@@ -19,6 +19,10 @@ export async function POST(_: Request, { params }: { params: Promise<{ id: strin
     return NextResponse.json({ error: 'Quote not found.' }, { status: 404 });
   }
 
+  if (quote.status !== 'draft') {
+    return NextResponse.json({ error: 'Quote already sent or closed.' }, { status: 409 });
+  }
+
   const quoteWithClient = quote as typeof quote & { client: NonNullable<typeof quote.client> };
 
   try {
@@ -27,14 +31,18 @@ export async function POST(_: Request, { params }: { params: Promise<{ id: strin
 
     const sentAt = new Date().toISOString();
     const supabase = createSupabaseAdminClient();
-    await supabase.update<QuoteRecord>(
+    const updated = await supabase.update<QuoteRecord>(
       'quotes',
       {
         status: 'sent',
         sent_at: sentAt
       },
-      [eq('id', id), eq('user_id', user.id)]
+      [eq('id', id), eq('user_id', user.id), eq('status', 'draft')]
     );
+
+    if (!updated.length) {
+      return NextResponse.json({ error: 'Quote already sent by another request.' }, { status: 409 });
+    }
 
     await createQuoteEvent(id, 'sent', { sentAt });
 

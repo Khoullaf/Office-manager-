@@ -1,0 +1,242 @@
+diff --git a/.env.example b/.env.example
+index 870492b..d006526 100644
+--- a/.env.example
++++ b/.env.example
+@@ -1,7 +1,8 @@
+-NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
++NEXT_PUBLIC_SUPABASE_URL=https://your-project-ref.supabase.co
+ NEXT_PUBLIC_SUPABASE_ANON_KEY=your-supabase-anon-key
+ SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-key
+ RESEND_API_KEY=re_your_resend_api_key
+ APP_BASE_URL=http://localhost:3000
+-CRON_SECRET=replace-with-a-long-random-secret
+-EMAIL_FROM=quotes@example.com
++CRON_SECRET=replace-with-a-strong-secret
++CRON_ALLOWED_IPS=
++EMAIL_FROM=noreply@example.com
+diff --git a/README.md b/README.md
+index 7c85a77..03617be 100644
+--- a/README.md
++++ b/README.md
+@@ -210,6 +210,7 @@ Required variables:
+ - `RESEND_API_KEY`
+ - `APP_BASE_URL`
+ - `CRON_SECRET`
++- `CRON_ALLOWED_IPS` (optional, comma-separated IP allowlist for cron caller)
+ - `EMAIL_FROM`
+ 
+ ## 6. Local setup
+@@ -246,4 +247,4 @@ npm run build
+ 
+ - `opened` means the client opened the public quote page, not the email itself.
+ - Stripe is intentionally out of scope for this first MVP.
+-- For a later production version, add password reset, token refresh, richer PDF branding, and automated tests.
++- For a later production version, add password reset, richer PDF branding, and automated tests.
+diff --git a/app/api/cron/follow-ups/route.ts b/app/api/cron/follow-ups/route.ts
+index 90efe06..15ca4f0 100644
+--- a/app/api/cron/follow-ups/route.ts
++++ b/app/api/cron/follow-ups/route.ts
+@@ -5,12 +5,43 @@ import { getEnv } from '@/lib/env';
+ import { createSupabaseAdminClient, eq, inList, rawFilter } from '@/lib/supabase';
+ import type { QuoteRecord } from '@/lib/types';
+ 
++function getRequestIp(request: Request) {
++  const forwardedFor = request.headers.get('x-forwarded-for');
++  if (forwardedFor) {
++    return forwardedFor.split(',')[0]?.trim() ?? null;
++  }
++
++  return request.headers.get('x-real-ip');
++}
++
++function ipAllowed(request: Request) {
++  const allowedIps = getEnv()
++    .CRON_ALLOWED_IPS.split(',')
++    .map((ip) => ip.trim())
++    .filter(Boolean);
++
++  if (!allowedIps.length) {
++    return true;
++  }
++
++  const ip = getRequestIp(request);
++  if (!ip) {
++    return false;
++  }
++
++  return allowedIps.includes(ip);
++}
++
+ export async function POST(request: Request) {
+   const authHeader = request.headers.get('authorization');
+   if (authHeader !== `Bearer ${getEnv().CRON_SECRET}`) {
+     return NextResponse.json({ error: 'Unauthorized.' }, { status: 401 });
+   }
+ 
++  if (!ipAllowed(request)) {
++    return NextResponse.json({ error: 'Forbidden.' }, { status: 403 });
++  }
++
+   try {
+     const supabase = createSupabaseAdminClient();
+     const now = new Date();
+diff --git a/app/api/quotes/[id]/send/route.ts b/app/api/quotes/[id]/send/route.ts
+index c482847..33c73e0 100644
+--- a/app/api/quotes/[id]/send/route.ts
++++ b/app/api/quotes/[id]/send/route.ts
+@@ -19,6 +19,10 @@ export async function POST(_: Request, { params }: { params: Promise<{ id: strin
+     return NextResponse.json({ error: 'Quote not found.' }, { status: 404 });
+   }
+ 
++  if (quote.status !== 'draft') {
++    return NextResponse.json({ error: 'Quote already sent or closed.' }, { status: 409 });
++  }
++
+   const quoteWithClient = quote as typeof quote & { client: NonNullable<typeof quote.client> };
+ 
+   try {
+@@ -27,15 +31,19 @@ export async function POST(_: Request, { params }: { params: Promise<{ id: strin
+ 
+     const sentAt = new Date().toISOString();
+     const supabase = createSupabaseAdminClient();
+-    await supabase.update<QuoteRecord>(
++    const updated = await supabase.update<QuoteRecord>(
+       'quotes',
+       {
+         status: 'sent',
+         sent_at: sentAt
+       },
+-      [eq('id', id), eq('user_id', user.id)]
++      [eq('id', id), eq('user_id', user.id), eq('status', 'draft')]
+     );
+ 
++    if (!updated.length) {
++      return NextResponse.json({ error: 'Quote already sent by another request.' }, { status: 409 });
++    }
++
+     await createQuoteEvent(id, 'sent', { sentAt });
+ 
+     return NextResponse.json({ success: true });
+diff --git a/lib/auth.ts b/lib/auth.ts
+index dac8a71..2f6a6a4 100644
+--- a/lib/auth.ts
++++ b/lib/auth.ts
+@@ -43,6 +43,15 @@ export async function signInWithPassword(email: string, password: string) {
+   return (await response.json()) as AuthSession;
+ }
+ 
++export async function refreshSession(refreshToken: string) {
++  const response = await authFetch('/token?grant_type=refresh_token', {
++    method: 'POST',
++    body: JSON.stringify({ refresh_token: refreshToken })
++  });
++
++  return (await response.json()) as AuthSession;
++}
++
+ export async function fetchUserFromAccessToken(accessToken: string) {
+   const response = await authFetch('/user', {
+     headers: {
+@@ -86,15 +95,35 @@ export async function clearSession() {
+ 
+ export async function getCurrentUser() {
+   const cookieStore = await cookies();
+-  const token = cookieStore.get(ACCESS_COOKIE)?.value;
++  const accessToken = cookieStore.get(ACCESS_COOKIE)?.value;
++  const refreshToken = cookieStore.get(REFRESH_COOKIE)?.value;
++
++  if (!accessToken && !refreshToken) {
++    return null;
++  }
++
++  try {
++    if (accessToken) {
++      return await fetchUserFromAccessToken(accessToken);
++    }
++  } catch {
++    // Fallback to refresh below.
++  }
+ 
+-  if (!token) {
++  if (!refreshToken) {
+     return null;
+   }
+ 
+   try {
+-    return await fetchUserFromAccessToken(token);
++    const session = await refreshSession(refreshToken);
++    await storeSession(session);
++    if (!session.access_token) {
++      return null;
++    }
++
++    return await fetchUserFromAccessToken(session.access_token);
+   } catch {
++    await clearSession();
+     return null;
+   }
+ }
+diff --git a/lib/email.ts b/lib/email.ts
+index f65a18b..19b7bfa 100644
+--- a/lib/email.ts
++++ b/lib/email.ts
+@@ -3,7 +3,16 @@ import { getEnv } from './env';
+ import type { QuoteRecord } from './types';
+ import { formatCurrency } from './utils';
+ 
+-const resend = new Resend(getEnv().RESEND_API_KEY);
++let cachedResend: Resend | null = null;
++
++function getResendClient() {
++  if (cachedResend) {
++    return cachedResend;
++  }
++
++  cachedResend = new Resend(getEnv().RESEND_API_KEY);
++  return cachedResend;
++}
+ 
+ type QuoteWithClient = QuoteRecord & {
+   client: {
+@@ -18,6 +27,8 @@ function quoteLink(token: string) {
+ }
+ 
+ export async function sendQuoteEmail(quote: QuoteWithClient, pdfBuffer?: Buffer) {
++  const resend = getResendClient();
++
+   return resend.emails.send({
+     from: getEnv().EMAIL_FROM,
+     to: quote.client.email,
+@@ -41,6 +52,8 @@ export async function sendQuoteEmail(quote: QuoteWithClient, pdfBuffer?: Buffer)
+ }
+ 
+ export async function sendFollowUpEmail(quote: QuoteWithClient, followUpNumber: number) {
++  const resend = getResendClient();
++
+   return resend.emails.send({
+     from: getEnv().EMAIL_FROM,
+     to: quote.client.email,
+diff --git a/lib/env.ts b/lib/env.ts
+index e2924d4..fae556d 100644
+--- a/lib/env.ts
++++ b/lib/env.ts
+@@ -7,7 +7,8 @@ const envSchema = z.object({
+   RESEND_API_KEY: z.string().min(1),
+   APP_BASE_URL: z.string().url(),
+   CRON_SECRET: z.string().min(1),
+-  EMAIL_FROM: z.string().email()
++  EMAIL_FROM: z.string().email(),
++  CRON_ALLOWED_IPS: z.string().optional().default('')
+ });
+ 
+ let cachedEnv: z.infer<typeof envSchema> | null = null;
+@@ -24,7 +25,8 @@ export function getEnv() {
+     RESEND_API_KEY: process.env.RESEND_API_KEY,
+     APP_BASE_URL: process.env.APP_BASE_URL,
+     CRON_SECRET: process.env.CRON_SECRET,
+-    EMAIL_FROM: process.env.EMAIL_FROM
++    EMAIL_FROM: process.env.EMAIL_FROM,
++    CRON_ALLOWED_IPS: process.env.CRON_ALLOWED_IPS
+   });
+ 
+   return cachedEnv;

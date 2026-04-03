@@ -7,7 +7,8 @@ const envSchema = z.object({
   RESEND_API_KEY: z.string().min(1),
   APP_BASE_URL: z.string().url(),
   CRON_SECRET: z.string().min(1),
-  EMAIL_FROM: z.string().email()
+  EMAIL_FROM: z.string().email(),
+  CRON_ALLOWED_IPS: z.string().optional().default('')
 });
 
 let cachedEnv: z.infer<typeof envSchema> | null = null;
@@ -24,7 +25,8 @@ export function getEnv() {
     RESEND_API_KEY: process.env.RESEND_API_KEY,
     APP_BASE_URL: process.env.APP_BASE_URL,
     CRON_SECRET: process.env.CRON_SECRET,
-    EMAIL_FROM: process.env.EMAIL_FROM
+    EMAIL_FROM: process.env.EMAIL_FROM,
+    CRON_ALLOWED_IPS: process.env.CRON_ALLOWED_IPS
   });
 
   return cachedEnv;

@@ -210,6 +210,7 @@ Required variables:
 - `RESEND_API_KEY`
 - `APP_BASE_URL`
 - `CRON_SECRET`
+- `CRON_ALLOWED_IPS` (optional, comma-separated IP allowlist for cron caller)
 - `EMAIL_FROM`
 
 ## 6. Local setup
@@ -246,4 +247,4 @@ npm run build
 
 - `opened` means the client opened the public quote page, not the email itself.
 - Stripe is intentionally out of scope for this first MVP.
-- For a later production version, add password reset, token refresh, richer PDF branding, and automated tests.
+- For a later production version, add password reset, richer PDF branding, and automated tests.

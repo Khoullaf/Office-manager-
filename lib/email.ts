@@ -3,7 +3,16 @@ import { getEnv } from './env';
 import type { QuoteRecord } from './types';
 import { formatCurrency } from './utils';
 
-const resend = new Resend(getEnv().RESEND_API_KEY);
+let cachedResend: Resend | null = null;
+
+function getResendClient() {
+  if (cachedResend) {
+    return cachedResend;
+  }
+
+  cachedResend = new Resend(getEnv().RESEND_API_KEY);
+  return cachedResend;
+}
 
 type QuoteWithClient = QuoteRecord & {
   client: {
@@ -18,6 +27,8 @@ function quoteLink(token: string) {
 }
 
 export async function sendQuoteEmail(quote: QuoteWithClient, pdfBuffer?: Buffer) {
+  const resend = getResendClient();
+
   return resend.emails.send({
     from: getEnv().EMAIL_FROM,
     to: quote.client.email,
@@ -41,6 +52,8 @@ export async function sendQuoteEmail(quote: QuoteWithClient, pdfBuffer?: Buffer)
 }
 
 export async function sendFollowUpEmail(quote: QuoteWithClient, followUpNumber: number) {
+  const resend = getResendClient();
+
   return resend.emails.send({
     from: getEnv().EMAIL_FROM,
     to: quote.client.email,

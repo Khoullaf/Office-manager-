@@ -43,6 +43,15 @@ export async function signInWithPassword(email: string, password: string) {
   return (await response.json()) as AuthSession;
 }
 
+export async function refreshSession(refreshToken: string) {
+  const response = await authFetch('/token?grant_type=refresh_token', {
+    method: 'POST',
+    body: JSON.stringify({ refresh_token: refreshToken })
+  });
+
+  return (await response.json()) as AuthSession;
+}
+
 export async function fetchUserFromAccessToken(accessToken: string) {
   const response = await authFetch('/user', {
     headers: {
@@ -86,15 +95,35 @@ export async function clearSession() {
 
 export async function getCurrentUser() {
   const cookieStore = await cookies();
-  const token = cookieStore.get(ACCESS_COOKIE)?.value;
+  const accessToken = cookieStore.get(ACCESS_COOKIE)?.value;
+  const refreshToken = cookieStore.get(REFRESH_COOKIE)?.value;
 
-  if (!token) {
+  if (!accessToken && !refreshToken) {
     return null;
   }
 
   try {
-    return await fetchUserFromAccessToken(token);
+    if (accessToken) {
+      return await fetchUserFromAccessToken(accessToken);
+    }
   } catch {
+    // Fallback to refresh below.
+  }
+
+  if (!refreshToken) {
+    return null;
+  }
+
+  try {
+    const session = await refreshSession(refreshToken);
+    await storeSession(session);
+    if (!session.access_token) {
+      return null;
+    }
+
+    return await fetchUserFromAccessToken(session.access_token);
+  } catch {
+    await clearSession();
     return null;
   }
 }

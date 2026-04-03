@@ -5,10 +5,41 @@ import { getEnv } from '@/lib/env';
 import { createSupabaseAdminClient, eq, inList, rawFilter } from '@/lib/supabase';
 import type { QuoteRecord } from '@/lib/types';
 
+function getRequestIp(request: Request) {
+  const forwardedFor = request.headers.get('x-forwarded-for');
+  if (forwardedFor) {
+    return forwardedFor.split(',')[0]?.trim() ?? null;
+  }
+
+  return request.headers.get('x-real-ip');
+}
+
+function ipAllowed(request: Request) {
+  const allowedIps = getEnv()
+    .CRON_ALLOWED_IPS.split(',')
+    .map((ip) => ip.trim())
+    .filter(Boolean);
+
+  if (!allowedIps.length) {
+    return true;
+  }
+
+  const ip = getRequestIp(request);
+  if (!ip) {
+    return false;
+  }
+
+  return allowedIps.includes(ip);
+}
+
 export async function POST(request: Request) {
   const authHeader = request.headers.get('authorization');
   if (authHeader !== `Bearer ${getEnv().CRON_SECRET}`) {
     return NextResponse.json({ error: 'Unauthorized.' }, { status: 401 });
+  }
+
+  if (!ipAllowed(request)) {
+    return NextResponse.json({ error: 'Forbidden.' }, { status: 403 });
   }
 
   try {
