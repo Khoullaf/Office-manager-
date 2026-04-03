@@ -5,7 +5,7 @@ import { getAccessCookieName } from '@/lib/auth';
 const publicPaths = ['/login', '/signup', '/q'];
 const publicApiPrefixes = ['/api/auth', '/api/public', '/api/cron'];
 
-export function middleware(request: NextRequest) {
+export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   const isStaticAsset = pathname.startsWith('/_next') || pathname.includes('.') || pathname === '/favicon.ico';
